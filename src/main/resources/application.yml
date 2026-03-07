@@ -1,0 +1,173 @@
+# =============================================================================
+# Deterministic Log Simulation Engine — application.yml
+# =============================================================================
+# All simulation behaviour is controlled from this file.
+# The same seed + same config always produces byte-for-byte identical output.
+# =============================================================================
+
+simulation:
+
+  # ---------------------------------------------------------------------------
+  # Core simulation parameters
+  # ---------------------------------------------------------------------------
+
+  # Master random seed.  Every stochastic decision (event counts, log levels,
+  # message content, trace IDs, latency values, …) is derived from this seed.
+  # Change it to get a different — but still fully reproducible — log stream.
+  seed: 42
+
+  # ISO-8601 timestamp that the virtual clock starts from.
+  # All emitted log entries carry timestamps beginning at this value.
+  # Has no effect on event volume; only determines the timestamps in output.
+  virtual-start-time: "2024-01-15T00:00:00Z"
+
+  # Total length of the simulated time window in virtual hours.
+  # A 24-hour run at the default RPS settings produces ~47 million log events.
+  # Reduce to 1 or 2 during development to shorten run time and output size.
+  duration-hours: 24
+
+  # Virtual seconds that elapse per simulation tick.
+  # One tick = one iteration of the main engine loop.
+  # Increasing this speeds up the run but coarsens timestamp resolution.
+  tick-size-seconds: 1
+
+  # ---------------------------------------------------------------------------
+  # Service topology (ecommerce scenario)
+  # Each entry creates `instances` independent service nodes.
+  # ---------------------------------------------------------------------------
+  services:
+
+    # API gateway — entry point for all inbound HTTP traffic.
+    # Generates HTTP access logs; propagates traces to downstream services.
+    - name: api-gateway
+      type: gateway       # gateway | application | database | cache
+      instances: 2        # number of independent pods / replicas to simulate
+      base-rps: 100       # baseline events/second at 100 % traffic load
+      error-rate: 0.02    # fraction of events emitted as ERROR level (0.0–1.0)
+      slow-query-rate: 0.0
+
+    # Order processing service.
+    - name: order-service
+      type: application
+      instances: 3
+      base-rps: 30
+      error-rate: 0.05    # slightly elevated — order failures are common
+      slow-query-rate: 0.0
+
+    # Payment processing service.
+    - name: payment-service
+      type: application
+      instances: 2
+      base-rps: 10
+      error-rate: 0.03
+      slow-query-rate: 0.0
+
+    # Inventory / stock management service.
+    - name: inventory-service
+      type: application
+      instances: 2
+      base-rps: 25
+      error-rate: 0.02
+      slow-query-rate: 0.0
+
+    # User profile and authentication service.
+    - name: user-service
+      type: application
+      instances: 2
+      base-rps: 20
+      error-rate: 0.01
+      slow-query-rate: 0.0
+
+    # Primary PostgreSQL database.
+    # Generates SQL query logs; slow-query-rate controls WARN-level slow queries.
+    - name: postgres-main
+      type: database
+      instances: 1
+      base-rps: 150
+      error-rate: 0.005
+      slow-query-rate: 0.03  # ~3 % of queries flagged as slow (>1 s)
+
+    # Redis cache layer.
+    # Generates cache hit/miss events at high frequency.
+    - name: redis-cache
+      type: cache
+      instances: 1
+      base-rps: 300
+      error-rate: 0.001
+      slow-query-rate: 0.0
+
+  # ---------------------------------------------------------------------------
+  # Output sinks — multiple sinks can be active simultaneously
+  # ---------------------------------------------------------------------------
+  output:
+
+    # Print events to standard output in Logback text format.
+    # Disabled by default — a 24-hour run produces tens of millions of lines.
+    # Enable only for short runs or interactive debugging.
+    stdout: false
+
+    # -------------------------------------------------------------------------
+    # File output — writes two files in parallel on every run
+    # -------------------------------------------------------------------------
+    file:
+      enabled: true
+
+      # Logback-style plain-text log file.
+      # Format: "YYYY-MM-DD HH:mm:ss.SSS LEVEL [instanceId] [trace=X,span=Y] logger - message"
+      # File is truncated (not appended) at the start of each run.
+      text-path: ./output/simulation.log
+
+      # JSON Lines file — one JSON object per line, one line per log event.
+      # Ideal for ingestion by log parsers, Elasticsearch, or AI pipelines.
+      # File is truncated (not appended) at the start of each run.
+      json-path: ./output/simulation.jsonl
+
+    # -------------------------------------------------------------------------
+    # Kafka output — publishes each log event as a JSON message
+    # Partition key = traceId, so all correlated events land in the same partition.
+    # -------------------------------------------------------------------------
+    kafka:
+      # Set to true only when a Kafka broker is reachable at bootstrap-servers.
+      # The app starts cleanly without a broker when this is false.
+      enabled: false
+
+      # Comma-separated list of broker addresses (host:port).
+      bootstrap-servers: localhost:9092
+
+      # Kafka topic to publish log events to.
+      # Topic must exist before the engine starts (auto-creation is broker-dependent).
+      topic: simulation-logs
+
+      # -----------------------------------------------------------------------
+      # Kafka producer tuning
+      # These map 1-to-1 to standard Kafka producer client properties.
+      # See: https://kafka.apache.org/documentation/#producerconfigs
+      # -----------------------------------------------------------------------
+      producer:
+        # Broker acknowledgement level: "0" = none, "1" = leader, "all" = full ISR.
+        acks: "1"
+
+        # Milliseconds to wait before sending a batch (trades latency for throughput).
+        linger-ms: 5
+
+        # Maximum batch size in bytes per partition (64 KB default).
+        batch-size: 65536
+
+        # Batch compression algorithm: none | gzip | snappy | lz4 | zstd.
+        # lz4 gives a good balance of ratio and CPU cost for log-shaped data.
+        compression-type: lz4
+
+        # Serializer for message keys (traceId strings).
+        key-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+        # Serializer for message values (JSON strings).
+        value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+# =============================================================================
+# Spring / Logback logging
+# Suppress Spring Boot's own startup banners — the engine logs its own summary.
+# =============================================================================
+logging:
+  level:
+    root: WARN
+    com.loggenengine: INFO
