@@ -1,0 +1,14 @@
+# Build output
+target/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# macOS
+.DS_Store
+
+# Simulation output (large files)
+output/
