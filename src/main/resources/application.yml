@@ -129,7 +129,7 @@ simulation:
     kafka:
       # Set to true only when a Kafka broker is reachable at bootstrap-servers.
       # The app starts cleanly without a broker when this is false.
-      enabled: false
+      enabled: true
 
       # Comma-separated list of broker addresses (host:port).
       bootstrap-servers: localhost:9092
