@@ -283,6 +283,50 @@ public class ApplicationLogGenerator implements LogEventGenerator {
                 "main", node.getName() + " heartbeat OK", f);
     }
 
+    /**
+     * Emits a single "order fulfilled" completion event on the order-service span,
+     * logged after all downstream calls (user-service, inventory-service, payment-service)
+     * have returned. Other services are terminal and return nothing.
+     */
+    @Override
+    public List<LogEvent> generateCompletion(ServiceNode node, TraceContext trace,
+                                             Instant timestamp, DeterministicRandom rng,
+                                             AtomicLong sequenceCounter) {
+        if (!"order-service".equals(node.getName())) return List.of();
+
+        String orderId   = "ORD-" + rng.nextIntBetween(100000, 999999);
+        long durationMs  = rng.nextLongBetween(150, 1200);
+        String custId    = "cust-" + rng.nextIntBetween(1000, 99999);
+
+        Map<String, Object> f = new LinkedHashMap<>();
+        f.put("orderId",        orderId);
+        f.put("customerId",     custId);
+        f.put("status",         "COMPLETED");
+        f.put("totalDurationMs", durationMs);
+        f.put("steps",          List.of("user-validated", "inventory-reserved", "payment-charged"));
+
+        long jitter = rng.nextLongBetween(0, 999);
+
+        LogEvent event = LogEvent.builder()
+                .sequenceNumber(sequenceCounter.getAndIncrement())
+                .timestamp(timestamp.plusMillis(jitter))
+                .level(LogLevel.INFO)
+                .eventType(EventType.APPLICATION)
+                .service(node.getName())
+                .instanceId(node.getInstanceId())
+                .traceId(trace.traceId())
+                .spanId(trace.spanId())
+                .parentSpanId(trace.parentSpanId())
+                .logger("c.l.e.OrderService")
+                .thread("http-nio-8080-exec-" + rng.nextIntBetween(1, 20))
+                .message("Order " + orderId + " fulfilled in " + durationMs
+                         + "ms — user validated, inventory reserved, payment charged")
+                .fields(f)
+                .build();
+
+        return List.of(event);
+    }
+
     private record AppEvent(LogLevel level, String logger, String thread,
                             String message, Map<String, Object> fields) {}
 }

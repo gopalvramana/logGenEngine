@@ -46,15 +46,22 @@ simulation:
       error-rate: 0.02    # fraction of events emitted as ERROR level (0.0–1.0)
       slow-query-rate: 0.0
 
-    # Order processing service.
+    # Order processing service — orchestrates the full checkout flow.
+    # Calls user-service (auth), inventory-service (reserve stock), payment-service (charge).
+    # Emits a completion event after all downstream calls return.
     - name: order-service
       type: application
       instances: 3
       base-rps: 30
       error-rate: 0.05    # slightly elevated — order failures are common
       slow-query-rate: 0.0
+      calls:
+        - user-service
+        - inventory-service
+        - payment-service
 
-    # Payment processing service.
+    # Payment processing service — terminal service, charges the customer.
+    # Writes the payment record to postgres; no further app-to-app calls.
     - name: payment-service
       type: application
       instances: 2
@@ -62,7 +69,8 @@ simulation:
       error-rate: 0.03
       slow-query-rate: 0.0
 
-    # Inventory / stock management service.
+    # Inventory / stock management service — terminal service, reserves stock.
+    # Reads/writes inventory table in postgres; no further app-to-app calls.
     - name: inventory-service
       type: application
       instances: 2
@@ -70,7 +78,8 @@ simulation:
       error-rate: 0.02
       slow-query-rate: 0.0
 
-    # User profile and authentication service.
+    # User profile and authentication service — terminal service, validates the caller.
+    # Reads the users table in postgres; no further app-to-app calls.
     - name: user-service
       type: application
       instances: 2

@@ -5,6 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -155,6 +156,13 @@ public class SimulationProperties {
          * {@code explainNeeded=true} field.
          */
         private double slowQueryRate = 0.0;
+
+        /**
+         * Downstream service names this service calls during normal request processing.
+         * Drives app-to-app trace propagation in the simulation engine.
+         * Example: order-service calls [user-service, inventory-service, payment-service].
+         */
+        private List<String> calls = new ArrayList<>();
     }
 
     /**
