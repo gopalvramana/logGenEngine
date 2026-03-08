@@ -11,7 +11,9 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * The core simulation loop.
@@ -45,6 +47,23 @@ public class SimulationEngine {
     /** Probability that an application event triggers a DB query. */
     private static final double DB_CALL_PROB = 0.45;
 
+    /** Probability that an app service propagates to each of its configured downstream services. */
+    private static final double APP_TO_APP_CALL_PROB = 0.55;
+
+    /**
+     * Maximum app-tier call depth before stopping propagation.
+     * depth=1: gateway → app (e.g. order-service)
+     * depth=2: app → app (e.g. order-service → payment-service)
+     * DB calls are always allowed regardless of depth.
+     */
+    private static final int MAX_APP_DEPTH = 2;
+
+    /** Populated at run() start: service name → nodes for that service. */
+    private Map<String, List<ServiceNode>> nodesByService;
+
+    /** Populated at run() start: service name → list of downstream service names it calls. */
+    private Map<String, List<String>> callGraph;
+
     public void run() throws Exception {
         long seed = props.getSeed();
         DeterministicRandom rng = new DeterministicRandom(seed);
@@ -55,6 +74,16 @@ public class SimulationEngine {
                 .filter(n -> n.getType().equals("application")).toList();
         List<ServiceNode> dbNodes  = nodes.stream()
                 .filter(n -> n.getType().equals("database")).toList();
+
+        // Index nodes by service name for O(1) lookup during app-to-app propagation
+        nodesByService = nodes.stream().collect(Collectors.groupingBy(ServiceNode::getName));
+
+        // Build call graph from config: service name → downstream service names
+        callGraph = props.getServices().stream()
+                .filter(sc -> sc.getCalls() != null && !sc.getCalls().isEmpty())
+                .collect(Collectors.toMap(
+                        SimulationProperties.ServiceConfig::getName,
+                        SimulationProperties.ServiceConfig::getCalls));
 
         AtomicLong seqCounter = new AtomicLong(1);
 
@@ -114,6 +143,13 @@ public class SimulationEngine {
     /**
      * Generate all log events for one occurrence on a service node.
      * May include downstream service + DB events sharing the same traceId.
+     *
+     * <p>Gateway nodes fan out to 1–3 random application services (child spans).
+     * Each application service may further propagate to its configured downstream
+     * services (app-to-app), and any app service may call the DB.
+     *
+     * <p>This produces realistic multi-hop traces such as:
+     * {@code api-gateway → order-service → payment-service → postgres-main}
      */
     private List<LogEvent> generateEvents(ServiceNode node, TraceContext rootTrace,
                                           Instant now, DeterministicRandom rng,
@@ -124,11 +160,11 @@ public class SimulationEngine {
         List<LogEvent> events = new ArrayList<>();
         boolean isError = rng.nextBoolean(node.getErrorRate());
 
-        // Primary event
+        // Primary event on this node
         LogEventGenerator primaryGen = pickPrimaryGenerator(node, isError, rng);
         events.addAll(primaryGen.generate(node, rootTrace, now, rng, seqCounter));
 
-        // Trace propagation: gateway events trigger downstream application calls
+        // Gateway → downstream app propagation
         if (node.getType().equals("gateway") && rng.nextBoolean(TRACE_PROPAGATION_PROB)
                 && !appNodes.isEmpty()) {
 
@@ -137,22 +173,12 @@ public class SimulationEngine {
                 ServiceNode downstream = rng.nextElement(appNodes);
                 String childSpanId = rng.nextHex(8);
                 TraceContext childTrace = rootTrace.childSpan(childSpanId);
-
-                boolean downstreamError = rng.nextBoolean(downstream.getErrorRate());
-                LogEventGenerator dGen = pickPrimaryGenerator(downstream, downstreamError, rng);
-                events.addAll(dGen.generate(downstream, childTrace, now, rng, seqCounter));
-
-                // Application services often call the DB
-                if (rng.nextBoolean(DB_CALL_PROB) && !dbNodes.isEmpty()) {
-                    ServiceNode dbNode = rng.nextElement(dbNodes);
-                    String dbSpanId = rng.nextHex(8);
-                    TraceContext dbTrace = childTrace.childSpan(dbSpanId);
-                    events.addAll(dbGen.generate(dbNode, dbTrace, now, rng, seqCounter));
-                }
+                events.addAll(generateAppServiceEvents(downstream, childTrace, now, rng,
+                        seqCounter, dbNodes, 1));
             }
         }
 
-        // Database nodes: some events also generate a parent application context note
+        // Database standalone events: attach a synthetic app-caller context note
         if (node.getType().equals("database") && rng.nextBoolean(DB_CALL_PROB)
                 && !appNodes.isEmpty()) {
 
@@ -160,6 +186,62 @@ public class SimulationEngine {
             String callerSpanId = rng.nextHex(8);
             TraceContext callerTrace = rootTrace.childSpan(callerSpanId);
             events.addAll(appGen.generate(caller, callerTrace, now, rng, seqCounter));
+        }
+
+        return events;
+    }
+
+    /**
+     * Generate log events for an application-tier service at the given call depth,
+     * including any configured app-to-app downstream calls and a probabilistic DB call.
+     *
+     * <p>Call depth controls how far the trace propagates:
+     * <ul>
+     *   <li>depth=1 — directly called by the gateway (e.g. order-service)</li>
+     *   <li>depth=2 — called by another app service (e.g. payment-service)</li>
+     * </ul>
+     * App-to-app propagation stops at {@link #MAX_APP_DEPTH} to prevent runaway chains.
+     * DB calls are always allowed at any depth.
+     *
+     * @param node        the application service node to generate events for
+     * @param trace       the parent {@link TraceContext} (traceId is inherited; new spanId assigned)
+     * @param depth       current hop depth within the app tier (starts at 1 from gateway)
+     */
+    private List<LogEvent> generateAppServiceEvents(ServiceNode node, TraceContext trace,
+                                                    Instant now, DeterministicRandom rng,
+                                                    AtomicLong seqCounter,
+                                                    List<ServiceNode> dbNodes,
+                                                    int depth) {
+        List<LogEvent> events = new ArrayList<>();
+
+        // Generate the primary event for this service
+        boolean isError = rng.nextBoolean(node.getErrorRate());
+        LogEventGenerator gen = pickPrimaryGenerator(node, isError, rng);
+        events.addAll(gen.generate(node, trace, now, rng, seqCounter));
+
+        // App → App: propagate to each configured downstream service (within depth limit)
+        if (depth < MAX_APP_DEPTH) {
+            List<String> downstream = callGraph.getOrDefault(node.getName(), List.of());
+            for (String calledService : downstream) {
+                if (rng.nextBoolean(APP_TO_APP_CALL_PROB)) {
+                    List<ServiceNode> calledNodes = nodesByService.getOrDefault(calledService, List.of());
+                    if (!calledNodes.isEmpty()) {
+                        ServiceNode calledNode = rng.nextElement(calledNodes);
+                        String childSpanId = rng.nextHex(8);
+                        TraceContext childTrace = trace.childSpan(childSpanId);
+                        events.addAll(generateAppServiceEvents(calledNode, childTrace, now, rng,
+                                seqCounter, dbNodes, depth + 1));
+                    }
+                }
+            }
+        }
+
+        // App → DB: probabilistic database call (always allowed, regardless of depth)
+        if (rng.nextBoolean(DB_CALL_PROB) && !dbNodes.isEmpty()) {
+            ServiceNode dbNode = rng.nextElement(dbNodes);
+            String dbSpanId = rng.nextHex(8);
+            TraceContext dbTrace = trace.childSpan(dbSpanId);
+            events.addAll(dbGen.generate(dbNode, dbTrace, now, rng, seqCounter));
         }
 
         return events;

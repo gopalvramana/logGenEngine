@@ -5,6 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -155,6 +156,20 @@ public class SimulationProperties {
          * {@code explainNeeded=true} field.
          */
         private double slowQueryRate = 0.0;
+
+        /**
+         * Downstream service names that this service calls as part of its
+         * normal operation (app-to-app trace propagation).
+         *
+         * <p>For each entry, the engine probabilistically generates a child span
+         * on that service, sharing the same {@code traceId}. This enables
+         * realistic multi-hop traces such as:
+         * {@code api-gateway → order-service → payment-service → postgres}.
+         *
+         * <p>Cycles are prevented by a maximum propagation depth of
+         * {@code SimulationEngine.MAX_APP_DEPTH}.
+         */
+        private List<String> calls = new ArrayList<>();
     }
 
     /**

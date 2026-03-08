@@ -47,14 +47,19 @@ simulation:
       slow-query-rate: 0.0
 
     # Order processing service.
+    # Calls payment-service (to charge) and inventory-service (to reserve stock).
     - name: order-service
       type: application
       instances: 3
       base-rps: 30
       error-rate: 0.05    # slightly elevated — order failures are common
       slow-query-rate: 0.0
+      calls:
+        - payment-service
+        - inventory-service
 
     # Payment processing service.
+    # Terminal service — charges the customer and writes to DB; no further app calls.
     - name: payment-service
       type: application
       instances: 2
@@ -63,6 +68,7 @@ simulation:
       slow-query-rate: 0.0
 
     # Inventory / stock management service.
+    # Terminal service — checks/reserves stock and writes to DB; no further app calls.
     - name: inventory-service
       type: application
       instances: 2
@@ -71,6 +77,7 @@ simulation:
       slow-query-rate: 0.0
 
     # User profile and authentication service.
+    # Called by api-gateway for auth; terminal — no further app calls.
     - name: user-service
       type: application
       instances: 2
